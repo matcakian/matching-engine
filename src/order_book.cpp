@@ -24,14 +24,16 @@ void OrderBook::validate(const Order& order) const {
 }
 
 void OrderBook::rest(Order order) {
+    // Save these fields before `order` is moved into the price-level queue below.
     const auto side = order.side;
+    const auto id = order.id;
     RestingOrder resting{std::move(order), next_sequence_++};
     if (side == Side::Buy) {
         bids_[resting.order.price].push_back(std::move(resting));
     } else {
         asks_[resting.order.price].push_back(std::move(resting));
     }
-    order_sides_[resting.order.id] = side;
+    order_sides_[id] = side;
 }
 
 SubmitResult OrderBook::submit(Order order) {
