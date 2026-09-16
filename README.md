@@ -11,10 +11,9 @@ A small, dependency-free limit-order matching engine that implements:
 ## Build and run
 
 ```bash
-cmake -S . -B build
-cmake --build build
-./build/matching_engine_demo
-ctest --test-dir build --output-on-failure
+make
+make run
+make test
 ```
 
 ## Matching rules
