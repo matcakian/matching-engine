@@ -1,0 +1,57 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #0e1116;
+  color: #f5f7fa;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; background: radial-gradient(circle at top, #19232d, #0e1116 48rem); }
+.dashboard { width: min(1120px, calc(100% - 2rem)); margin: 0 auto; padding: 3.5rem 0; }
+.page-header, .panel-heading, .connection-status, .spread-row, .book-level, .activity-list li { display: flex; align-items: center; }
+.page-header { justify-content: space-between; gap: 1rem; margin-bottom: 2rem; }
+h1, h2, p { margin: 0; }
+h1 { font-size: clamp(2rem, 5vw, 3rem); letter-spacing: -0.05em; }
+h2 { font-size: 1.15rem; }
+.eyebrow { color: #65d6a6; font-size: .72rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+.subhead, .muted, .form-message { color: #9daab6; }
+.subhead { margin-top: .5rem; }
+.connection-status { gap: .5rem; border: 1px solid #2a3742; border-radius: 999px; padding: .45rem .75rem; color: #b7c3ce; font-size: .85rem; }
+.status-dot { width: .55rem; height: .55rem; border-radius: 50%; background: #f6ba4b; }
+.market-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; margin-bottom: 1rem; }
+.metric-card, .panel { border: 1px solid #26333e; border-radius: .8rem; background: rgba(19, 26, 33, .9); box-shadow: 0 1rem 3rem rgba(0, 0, 0, .14); }
+.metric-card { padding: 1rem 1.15rem; }
+.metric-card p { color: #9daab6; font-size: .8rem; }
+.metric-card strong { display: block; margin-top: .4rem; font-size: 1.28rem; }
+.workspace { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(320px, .8fr); gap: 1rem; }
+.panel { padding: 1.25rem; }
+.panel-heading { justify-content: space-between; gap: 1rem; margin-bottom: 1.15rem; }
+.muted { font-size: .78rem; }
+.book-columns, .book-level { display: grid; grid-template-columns: 1fr 1fr; }
+.book-columns { color: #788795; font-size: .72rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; padding: 0 .7rem .5rem; }
+.book-columns span:last-child, .level-quantity { text-align: right; }
+.levels { display: grid; gap: .3rem; }
+.book-level { position: relative; isolation: isolate; padding: .6rem .7rem; overflow: hidden; font-variant-numeric: tabular-nums; }
+.depth-bar { position: absolute; z-index: -1; inset: 0 0 0 auto; width: var(--depth); opacity: .14; }
+.asks .depth-bar { background: #ff6f80; }
+.bids .depth-bar { background: #65d6a6; }
+.asks .level-price { color: #ff9ca8; }
+.bids .level-price { color: #7de4b7; }
+.spread-row { justify-content: space-between; margin: .65rem 0; padding: .55rem .7rem; border-block: 1px solid #26333e; color: #9daab6; font-size: .82rem; }
+.spread-row strong { color: #f5f7fa; }
+.side-panels { display: grid; align-content: start; gap: 1rem; }
+form { display: grid; gap: .9rem; }
+label { display: grid; gap: .38rem; color: #c2ccd5; font-size: .8rem; font-weight: 700; }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: .7rem; }
+input, select, button { min-height: 2.55rem; border-radius: .45rem; font: inherit; }
+input, select { width: 100%; border: 1px solid #3a4a57; background: #121920; color: #f5f7fa; padding: 0 .7rem; }
+input:focus, select:focus { outline: 2px solid #65d6a6; outline-offset: 1px; }
+button { border: 0; background: #65d6a6; color: #0b1712; cursor: pointer; font-weight: 800; }
+button:hover { background: #83e7ba; }
+.form-message { min-height: 2.4em; margin-top: 1rem; font-size: .8rem; line-height: 1.45; }
+.activity-list { display: grid; gap: .7rem; list-style: none; padding: 0; margin: 0; }
+.activity-list li { justify-content: space-between; gap: .6rem; padding-bottom: .7rem; border-bottom: 1px solid #26333e; color: #d7dfe6; font-size: .85rem; }
+.activity-list li:last-child { border-bottom: 0; padding-bottom: 0; }
+.activity-list time { color: #788795; font-size: .75rem; white-space: nowrap; }
+@media (max-width: 800px) { .dashboard { padding: 1.5rem 0; } .market-summary { grid-template-columns: repeat(2, 1fr); } .workspace { grid-template-columns: 1fr; } }
+@media (max-width: 480px) { .page-header { align-items: flex-start; flex-direction: column; } .market-summary, .form-row { grid-template-columns: 1fr; } }
