@@ -186,7 +186,10 @@ document.querySelector("#order-form").addEventListener("submit", async (event) =
       ? `Order #${result.id} matched ${filledQuantity} unit${filledQuantity === 1 ? "" : "s"} across ${fills} fill${fills === 1 ? "" : "s"}.${result.resting ? " The remainder is resting." : ""}`
       : `Order #${result.id} is resting on the book.`;
     if (fills) {
-      const fillBreakdown = result.trades.map((trade) => `${trade.quantity.toLocaleString()} at ${formatPrice(trade.price)}`).join(", ");
+      const restingSide = order.side === "buy" ? "SELL" : "BUY";
+      const fillBreakdown = result.trades.map((trade) =>
+        `resting ${restingSide} #${trade.restingOrderId}: ${trade.quantity.toLocaleString()} at ${formatPrice(trade.price)}`,
+      ).join("; ");
       const remainder = result.resting ? ` · ${result.remainingQuantity.toLocaleString()} units resting` : " · fully filled";
       addActivity(orderSummary, `Filled ${filledQuantity.toLocaleString()} units in ${fills} match${fills === 1 ? "" : "es"}: ${fillBreakdown}${remainder}.`);
     } else {
