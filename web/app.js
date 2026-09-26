@@ -50,13 +50,21 @@ function formatPriceInput(event) {
   if (cents !== undefined && cents > 0) event.currentTarget.value = (cents / 100).toFixed(2);
 }
 
-function addActivity(message) {
+function addActivity(title, details) {
   const entry = document.createElement("li");
-  const text = document.createElement("span");
+  const content = document.createElement("div");
+  const text = document.createElement("strong");
   const time = document.createElement("time");
-  text.textContent = message;
+  text.textContent = title;
   time.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  entry.append(text, time);
+  content.append(text);
+  if (details) {
+    const detail = document.createElement("span");
+    detail.className = "activity-detail";
+    detail.textContent = details;
+    content.append(detail);
+  }
+  entry.append(content, time);
   const activity = document.querySelector("#activity");
   activity.prepend(entry);
   while (activity.children.length > 6) activity.lastElementChild.remove();
@@ -82,7 +90,7 @@ async function loadBook({ announce = false } = {}) {
     document.querySelector("#book-updated").textContent = `Updated ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
     const message = document.querySelector("#order-message");
     if (message.textContent.startsWith("Connecting")) message.textContent = "Ready to send orders to the local matching engine.";
-    if (announce) addActivity("Order book refreshed");
+    if (announce) addActivity("Order book refreshed", "Current aggregate depth loaded from the engine.");
   } catch (error) {
     setConnection(false);
     document.querySelector("#book-updated").textContent = "Waiting for local engine";
@@ -136,10 +144,13 @@ async function cancelOrder(id) {
     const order = openOrders.get(id);
     openOrders.delete(id);
     renderOpenOrders();
-    addActivity(`Cancelled ${order.side} order #${id}`);
+    addActivity(
+      `Cancelled ${order.side.toUpperCase()} order #${id}`,
+      `${order.quantity.toLocaleString()} units at ${formatPrice(order.price)} removed from the book.`,
+    );
     await loadBook();
   } catch (error) {
-    addActivity(`Could not cancel order #${id}: ${error.message}`);
+    addActivity(`Could not cancel order #${id}`, error.message);
   }
 }
 
@@ -169,10 +180,18 @@ document.querySelector("#order-form").addEventListener("submit", async (event) =
     }
     renderOpenOrders();
     const fills = result.trades.length;
+    const filledQuantity = result.trades.reduce((total, trade) => total + trade.quantity, 0);
+    const orderSummary = `${order.side.toUpperCase()} #${result.id} · ${quantity.toLocaleString()} units at ${formatPrice(price)}`;
     message.textContent = fills
-      ? `Order #${result.id} matched ${result.trades.reduce((total, trade) => total + trade.quantity, 0)} unit${result.remainingQuantity === 1 ? "" : "s"} across ${fills} fill${fills === 1 ? "" : "s"}.${result.resting ? " The remainder is resting." : ""}`
+      ? `Order #${result.id} matched ${filledQuantity} unit${filledQuantity === 1 ? "" : "s"} across ${fills} fill${fills === 1 ? "" : "s"}.${result.resting ? " The remainder is resting." : ""}`
       : `Order #${result.id} is resting on the book.`;
-    addActivity(fills ? `Order #${result.id} created ${fills} fill${fills === 1 ? "" : "s"}` : `Order #${result.id} is now resting`);
+    if (fills) {
+      const fillBreakdown = result.trades.map((trade) => `${trade.quantity.toLocaleString()} at ${formatPrice(trade.price)}`).join(", ");
+      const remainder = result.resting ? ` · ${result.remainingQuantity.toLocaleString()} units resting` : " · fully filled";
+      addActivity(orderSummary, `Filled ${filledQuantity.toLocaleString()} units in ${fills} match${fills === 1 ? "" : "es"}: ${fillBreakdown}${remainder}.`);
+    } else {
+      addActivity(orderSummary, `${result.remainingQuantity.toLocaleString()} units are resting on the book.`);
+    }
     await loadBook();
   } catch (error) {
     message.textContent = error.message;

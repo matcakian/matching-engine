@@ -56,8 +56,11 @@ button:active { transform: translateY(1px); }
 button:disabled { cursor: wait; opacity: .62; }
 .form-message { min-height: 2.4em; margin-top: 1rem; font-size: .8rem; line-height: 1.45; }
 .activity-list { display: grid; gap: .7rem; list-style: none; padding: 0; margin: 0; }
-.activity-list li { justify-content: space-between; gap: .6rem; padding-bottom: .7rem; border-bottom: 1px solid #26333e; color: #d7dfe6; font-size: .85rem; }
+.activity-list li { justify-content: space-between; align-items: flex-start; gap: .6rem; padding-bottom: .7rem; border-bottom: 1px solid #26333e; color: #d7dfe6; font-size: .85rem; }
 .activity-list li:last-child { border-bottom: 0; padding-bottom: 0; }
+.activity-list li > div { display: grid; gap: .2rem; min-width: 0; }
+.activity-list strong { font-size: .82rem; font-weight: 750; }
+.activity-detail { color: #8e9daa; font-size: .76rem; line-height: 1.4; }
 .activity-list time { color: #788795; font-size: .75rem; white-space: nowrap; }
 .open-orders { display: grid; gap: .55rem; }
 .empty-state { color: #788795; font-size: .82rem; padding: .2rem 0; }
