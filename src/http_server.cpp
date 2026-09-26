@@ -34,6 +34,7 @@ struct Response {
     std::string body;
 };
 
+// Escape the few characters that would otherwise make a JSON string invalid.
 std::string json_escape(std::string_view value) {
     std::string escaped;
     escaped.reserve(value.size());
@@ -50,6 +51,7 @@ std::string json_escape(std::string_view value) {
     return escaped;
 }
 
+// Serialize an ordered collection of aggregated book levels for an API response.
 std::string levels_json(const std::vector<BookLevel>& levels) {
     std::ostringstream output;
     output << '[';
@@ -61,6 +63,7 @@ std::string levels_json(const std::vector<BookLevel>& levels) {
     return output << ']', output.str();
 }
 
+// Serialize the fills produced by a submitted order for the client activity feed.
 std::string trades_json(const std::vector<Trade>& trades) {
     std::ostringstream output;
     output << '[';
@@ -75,6 +78,7 @@ std::string trades_json(const std::vector<Trade>& trades) {
     return output << ']', output.str();
 }
 
+// Extract a quoted field from the small, known JSON payloads accepted by this server.
 std::optional<std::string> string_field(std::string_view json, std::string_view name) {
     const std::string key = '"' + std::string(name) + '"';
     const std::size_t key_at = json.find(key);
@@ -89,6 +93,7 @@ std::optional<std::string> string_field(std::string_view json, std::string_view 
 }
 
 template <typename Integer>
+// Extract an integer field while rejecting empty, fractional, and overflowing values.
 std::optional<Integer> integer_field(std::string_view json, std::string_view name) {
     const std::string key = '"' + std::string(name) + '"';
     const std::size_t key_at = json.find(key);
@@ -105,6 +110,7 @@ std::optional<Integer> integer_field(std::string_view json, std::string_view nam
     return result;
 }
 
+// Choose the response MIME type needed for each static browser asset.
 std::string content_type(const std::filesystem::path& path) {
     const auto extension = path.extension();
     if (extension == ".html") return "text/html; charset=utf-8";
@@ -114,6 +120,7 @@ std::string content_type(const std::filesystem::path& path) {
     return "application/octet-stream";
 }
 
+// Read a static asset into memory so it can be written as the HTTP response body.
 std::string read_file(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
@@ -121,6 +128,7 @@ std::string read_file(const std::filesystem::path& path) {
 
 class EngineServer {
 public:
+    // Create the book service and seed it with enough depth for an immediately useful UI.
     explicit EngineServer(std::filesystem::path web_root) : web_root_(std::move(web_root)) {
         // A compact initial market makes the page useful as soon as it opens.
         submit_seed({1, Side::Sell, 10'075, 50});
@@ -131,6 +139,7 @@ public:
         submit_seed({6, Side::Buy, 9'950, 60});
     }
 
+    // Dispatch the parsed HTTP request to an API endpoint or a static web asset.
     Response handle(std::string_view method, std::string_view path, std::string_view body) {
         if (method == "GET" && path == "/api/book") return book_response();
         if (method == "POST" && path == "/api/orders") return submit_order(body);
@@ -140,11 +149,13 @@ public:
     }
 
 private:
+    // Submit initial liquidity and advance generated IDs beyond the seeded order.
     void submit_seed(Order order) {
         book_.submit(order);
         next_order_id_ = std::max(next_order_id_, order.id + 1);
     }
 
+    // Return the current aggregate depth plus the most recently generated fill.
     Response book_response() const {
         std::ostringstream output;
         output << R"({"bids":)" << levels_json(book_.bids())
@@ -160,6 +171,7 @@ private:
         return {200, "application/json", output.str()};
     }
 
+    // Validate a browser order payload, submit it to OrderBook, and report its outcome.
     Response submit_order(std::string_view body) {
         const auto side_text = string_field(body, "side");
         const auto price = integer_field<Price>(body, "price");
@@ -187,6 +199,7 @@ private:
         }
     }
 
+    // Parse an order ID from the REST path and remove that resting order if present.
     Response cancel_order(std::string_view path) {
         const auto id_text = path.substr(std::string_view("/api/orders/").size());
         OrderId id{};
@@ -198,6 +211,7 @@ private:
         return {200, "application/json", R"({"cancelled":true})"};
     }
 
+    // Safely resolve and serve a browser asset while rejecting traversal attempts.
     Response static_file(std::string_view requested_path) const {
         const std::string file_name = requested_path == "/" ? "index.html" : std::string(requested_path.substr(1));
         if (file_name.empty() || file_name.find("..") != std::string::npos) {
@@ -214,6 +228,7 @@ private:
     std::optional<Trade> last_trade_;
 };
 
+// Read one HTTP request, waiting until its declared body has arrived when present.
 std::string receive_request(int socket) {
     std::string request;
     char buffer[4096];
@@ -240,6 +255,7 @@ std::string receive_request(int socket) {
     return request;
 }
 
+// Build a minimal HTTP/1.1 response and keep writing until the client has all bytes.
 void send_response(int socket, const Response& response) {
     const std::string status_text = response.status == 200 ? "OK" : response.status == 201 ? "Created" :
                                     response.status == 400 ? "Bad Request" : "Not Found";
@@ -258,6 +274,7 @@ void send_response(int socket, const Response& response) {
 
 } // namespace
 
+// Start a loopback-only server and process one browser request at a time.
 int main(int argc, char* argv[]) {
     const int port = argc > 1 ? std::stoi(argv[1]) : 8080;
     const std::filesystem::path web_root = argc > 2 ? argv[2] : "web";
