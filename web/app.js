@@ -45,6 +45,11 @@ function parseCents(priceText) {
   return Number(match[1]) * 100 + Number((match[2] ?? "").padEnd(2, "0"));
 }
 
+function formatPriceInput(event) {
+  const cents = parseCents(event.currentTarget.value);
+  if (cents !== undefined && cents > 0) event.currentTarget.value = (cents / 100).toFixed(2);
+}
+
 function addActivity(message) {
   const entry = document.createElement("li");
   const text = document.createElement("span");
@@ -171,6 +176,7 @@ document.querySelector("#order-form").addEventListener("submit", async (event) =
 document.querySelector("#side").addEventListener("change", (event) => {
   document.querySelector("#submit-order").textContent = `Place ${event.target.value} order`;
 });
+document.querySelector("#price").addEventListener("change", formatPriceInput);
 
 loadBook();
 pollingTimer = window.setInterval(loadBook, 2_500);
