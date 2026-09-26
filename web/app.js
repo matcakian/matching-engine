@@ -121,6 +121,15 @@ function renderOpenOrders() {
   }
 }
 
+function applyFillsToOpenOrders(trades) {
+  for (const trade of trades) {
+    const restingOrder = openOrders.get(trade.restingOrderId);
+    if (!restingOrder) continue;
+    restingOrder.quantity -= trade.quantity;
+    if (restingOrder.quantity <= 0) openOrders.delete(trade.restingOrderId);
+  }
+}
+
 async function cancelOrder(id) {
   try {
     await request(`/api/orders/${id}`, { method: "DELETE" });
@@ -154,10 +163,11 @@ document.querySelector("#order-form").addEventListener("submit", async (event) =
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(order),
     });
+    applyFillsToOpenOrders(result.trades);
     if (result.resting) {
       openOrders.set(result.id, { id: result.id, ...order, quantity: result.remainingQuantity });
-      renderOpenOrders();
     }
+    renderOpenOrders();
     const fills = result.trades.length;
     message.textContent = fills
       ? `Order #${result.id} matched ${result.trades.reduce((total, trade) => total + trade.quantity, 0)} unit${result.remainingQuantity === 1 ? "" : "s"} across ${fills} fill${fills === 1 ? "" : "s"}.${result.resting ? " The remainder is resting." : ""}`
