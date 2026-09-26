@@ -3,21 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="A browser UI prototype for the matching engine." />
-    <title>Matching Engine | Browser UI</title>
+    <meta name="description" content="A local order-entry interface backed by the matching engine." />
+    <title>Matching Engine | Live order book</title>
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
     <main class="dashboard">
       <header class="page-header">
         <div>
-          <p class="eyebrow">Prototype</p>
-          <h1>Matching Engine</h1>
-          <p class="subhead">A minimal market view and order-entry surface.</p>
+          <p class="eyebrow">ME-01 · limit order book</p>
+          <h1>Trade the book.</h1>
+          <p class="subhead">Direct order entry, live depth, and deterministic price-time matching.</p>
         </div>
         <div class="connection-status" aria-label="Connection status">
           <span class="status-dot"></span>
-          Mock data
+          <span id="connection-label">Connecting</span>
         </div>
       </header>
 
@@ -25,14 +25,14 @@
         <article class="metric-card"><p>Best bid</p><strong id="best-bid">—</strong></article>
         <article class="metric-card"><p>Best ask</p><strong id="best-ask">—</strong></article>
         <article class="metric-card"><p>Spread</p><strong id="spread">—</strong></article>
-        <article class="metric-card"><p>Last trade</p><strong id="last-trade">—</strong></article>
+        <article class="metric-card"><p>Last fill</p><strong id="last-trade">—</strong></article>
       </section>
 
       <section class="workspace" aria-label="Order-book workspace">
         <article class="panel order-book-panel">
           <div class="panel-heading">
             <div><p class="eyebrow">Live view</p><h2>Order book</h2></div>
-            <span class="muted">Aggregated by price</span>
+            <span id="book-updated" class="muted">Loading book…</span>
           </div>
           <div class="book-columns" aria-hidden="true"><span>Price</span><span>Quantity</span></div>
           <div id="asks" class="levels asks" aria-label="Sell orders"></div>
@@ -42,7 +42,7 @@
 
         <aside class="side-panels">
           <section class="panel ticket-panel">
-            <div class="panel-heading"><div><p class="eyebrow">Order entry</p><h2>New limit order</h2></div></div>
+            <div class="panel-heading"><div><p class="eyebrow">Order entry</p><h2>New limit order</h2></div><span class="market-tag">USD</span></div>
             <form id="order-form">
               <label>Side
                 <select id="side" name="side"><option value="buy">Buy</option><option value="sell">Sell</option></select>
@@ -55,14 +55,21 @@
                   <input id="quantity" name="quantity" type="number" min="1" step="1" value="10" required />
                 </label>
               </div>
-              <button type="submit">Create mock request</button>
+              <button id="submit-order" type="submit">Place buy order</button>
             </form>
-            <p id="order-message" class="form-message" role="status">Requests stay in the browser until an engine API is connected.</p>
+            <p id="order-message" class="form-message" role="status">Connecting to the local matching engine…</p>
           </section>
 
           <section class="panel activity-panel">
             <div class="panel-heading"><div><p class="eyebrow">Event stream</p><h2>Activity</h2></div></div>
             <ol id="activity" class="activity-list" aria-live="polite"></ol>
+          </section>
+
+          <section class="panel orders-panel">
+            <div class="panel-heading"><div><p class="eyebrow">Your liquidity</p><h2>Open orders</h2></div><span id="open-order-count" class="muted">0 open</span></div>
+            <div id="open-orders" class="open-orders" aria-live="polite">
+              <p class="empty-state">Resting orders placed here appear here.</p>
+            </div>
           </section>
         </aside>
       </section>

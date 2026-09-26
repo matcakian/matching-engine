@@ -24,27 +24,21 @@ at least the best ask. An incoming sell matches the highest-priced resting buys
 while its limit price is at most the best bid. At each price level, older orders
 fill first. Trades execute at the resting order's price.
 
-## Browser UI prototype
+## Browser UI
 
-`web/` contains a dependency-free browser skeleton for the engine: a market
-summary, aggregated bid/ask depth, an order-entry form, and an activity feed.
-It uses clearly labeled sample data and creates mock requests only; it does not
-yet start the C++ engine or submit live orders.
-
-Preview it locally with:
+The dependency-free browser interface is served by a lightweight local HTTP
+bridge that owns an `OrderBook`. It displays aggregated depth, submits limit
+orders, reports fills, and lets you cancel resting orders created in the UI.
 
 ```bash
-python3 -m http.server 8080 -d web
+cmake -S . -B build
+cmake --build build
+./build/matching_engine_server
 ```
 
-Then open `http://localhost:8080` in a browser.
+Open `http://127.0.0.1:8080`. The server binds only to localhost and starts
+with a small illustrative book. It exposes:
 
-To make it live, add a small HTTP or WebSocket server around `OrderBook`:
-
-- `GET /api/book` returns the result of `bids()`, `asks()`, `best_bid()`, and
-  `best_ask()`.
-- `POST /api/orders` accepts an ID, side, price (in cents), and quantity, calls
-  `submit()`, and returns its trades, remaining quantity, and resting state.
-- `DELETE /api/orders/{id}` calls `cancel(id)`.
-- A WebSocket or server-sent-event stream publishes book and trade updates, so
-  the UI can replace the example snapshot with current engine state.
+- `GET /api/book` for the current depth and latest trade
+- `POST /api/orders` with `side`, `price` (integer cents), and `quantity`
+- `DELETE /api/orders/{id}` for cancellation

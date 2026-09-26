@@ -1,17 +1,19 @@
-// This temporary snapshot lets the interface render before a server exposes the
-// C++ OrderBook. Prices use the engine's integer-cents representation.
-const bookSnapshot = {
-  asks: [{ price: 10_075, quantity: 50 }, { price: 10_100, quantity: 120 }, { price: 10_150, quantity: 80 }],
-  bids: [{ price: 10_050, quantity: 75 }, { price: 10_000, quantity: 140 }, { price: 9_950, quantity: 60 }],
-  lastTrade: { price: 10_050, quantity: 20 },
-};
-
 const currency = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 });
+const openOrders = new Map();
+let pollingTimer;
 const formatPrice = (cents) => currency.format(cents / 100);
 
 function renderLevels(containerId, levels) {
   const container = document.querySelector(containerId);
   const template = document.querySelector("#level-template");
+  container.replaceChildren();
+  if (levels.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty-levels";
+    empty.textContent = "No resting orders";
+    container.append(empty);
+    return;
+  }
   const largestQuantity = Math.max(...levels.map(({ quantity }) => quantity));
   for (const level of levels) {
     const row = template.content.cloneNode(true);
@@ -30,7 +32,9 @@ function renderSnapshot(snapshot) {
   document.querySelector("#best-ask").textContent = bestAsk === undefined ? "—" : formatPrice(bestAsk);
   document.querySelector("#spread").textContent = spread === undefined ? "—" : formatPrice(spread);
   document.querySelector("#spread-row").textContent = spread === undefined ? "—" : formatPrice(spread);
-  document.querySelector("#last-trade").textContent = `${formatPrice(snapshot.lastTrade.price)} × ${snapshot.lastTrade.quantity}`;
+  document.querySelector("#last-trade").textContent = snapshot.lastTrade
+    ? `${formatPrice(snapshot.lastTrade.price)} × ${snapshot.lastTrade.quantity}`
+    : "—";
   renderLevels("#asks", [...snapshot.asks].reverse());
   renderLevels("#bids", snapshot.bids);
 }
@@ -48,13 +52,81 @@ function addActivity(message) {
   text.textContent = message;
   time.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   entry.append(text, time);
-  document.querySelector("#activity").prepend(entry);
+  const activity = document.querySelector("#activity");
+  activity.prepend(entry);
+  while (activity.children.length > 6) activity.lastElementChild.remove();
 }
 
-async function submitOrder(order) {
-  // Replace this mock result with a POST to an API backed by OrderBook::submit.
-  // For example: return fetch("/api/orders", { method: "POST", ... });
-  return { accepted: true, mode: "mock", order };
+function setConnection(connected) {
+  document.querySelector(".connection-status").classList.toggle("is-connected", connected);
+  document.querySelector("#connection-label").textContent = connected ? "Engine online" : "Engine unavailable";
+}
+
+async function request(path, options) {
+  const response = await fetch(path, options);
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error || "The engine rejected the request.");
+  return payload;
+}
+
+async function loadBook({ announce = false } = {}) {
+  try {
+    const snapshot = await request("/api/book");
+    renderSnapshot(snapshot);
+    setConnection(true);
+    document.querySelector("#book-updated").textContent = `Updated ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
+    const message = document.querySelector("#order-message");
+    if (message.textContent.startsWith("Connecting")) message.textContent = "Ready to send orders to the local matching engine.";
+    if (announce) addActivity("Order book refreshed");
+  } catch (error) {
+    setConnection(false);
+    document.querySelector("#book-updated").textContent = "Waiting for local engine";
+  }
+}
+
+function renderOpenOrders() {
+  const root = document.querySelector("#open-orders");
+  const entries = [...openOrders.values()];
+  document.querySelector("#open-order-count").textContent = `${entries.length} open`;
+  root.replaceChildren();
+  if (entries.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "Resting orders placed here appear here.";
+    root.append(empty);
+    return;
+  }
+  for (const order of entries) {
+    const row = document.createElement("div");
+    row.className = "open-order";
+    const details = document.createElement("div");
+    const side = document.createElement("span");
+    side.className = `order-side ${order.side}`;
+    side.textContent = order.side;
+    const description = document.createElement("p");
+    description.textContent = `${order.quantity.toLocaleString()} at ${formatPrice(order.price)}`;
+    details.append(side, description);
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.className = "cancel-order";
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", () => cancelOrder(order.id));
+    row.append(details, cancel);
+    root.append(row);
+  }
+}
+
+async function cancelOrder(id) {
+  try {
+    await request(`/api/orders/${id}`, { method: "DELETE" });
+    const order = openOrders.get(id);
+    openOrders.delete(id);
+    renderOpenOrders();
+    addActivity(`Cancelled ${order.side} order #${id}`);
+    await loadBook();
+  } catch (error) {
+    addActivity(`Could not cancel order #${id}: ${error.message}`);
+  }
 }
 
 document.querySelector("#order-form").addEventListener("submit", async (event) => {
@@ -68,10 +140,38 @@ document.querySelector("#order-form").addEventListener("submit", async (event) =
     return;
   }
   const order = { side: form.get("side"), price, quantity };
-  const result = await submitOrder(order);
-  message.textContent = `Mock request created: ${result.order.side.toUpperCase()} ${quantity} at ${formatPrice(price)}. No order was sent.`;
-  addActivity(`Mock ${result.order.side} request: ${quantity} at ${formatPrice(price)}`);
+  const button = document.querySelector("#submit-order");
+  button.disabled = true;
+  button.textContent = "Sending order…";
+  try {
+    const result = await request("/api/orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(order),
+    });
+    if (result.resting) {
+      openOrders.set(result.id, { id: result.id, ...order, quantity: result.remainingQuantity });
+      renderOpenOrders();
+    }
+    const fills = result.trades.length;
+    message.textContent = fills
+      ? `Order #${result.id} matched ${result.trades.reduce((total, trade) => total + trade.quantity, 0)} unit${result.remainingQuantity === 1 ? "" : "s"} across ${fills} fill${fills === 1 ? "" : "s"}.${result.resting ? " The remainder is resting." : ""}`
+      : `Order #${result.id} is resting on the book.`;
+    addActivity(fills ? `Order #${result.id} created ${fills} fill${fills === 1 ? "" : "s"}` : `Order #${result.id} is now resting`);
+    await loadBook();
+  } catch (error) {
+    message.textContent = error.message;
+    setConnection(false);
+  } finally {
+    button.disabled = false;
+    button.textContent = `Place ${form.get("side")} order`;
+  }
 });
 
-renderSnapshot(bookSnapshot);
-addActivity("Loaded example order-book snapshot");
+document.querySelector("#side").addEventListener("change", (event) => {
+  document.querySelector("#submit-order").textContent = `Place ${event.target.value} order`;
+});
+
+loadBook();
+pollingTimer = window.setInterval(loadBook, 2_500);
+window.addEventListener("beforeunload", () => window.clearInterval(pollingTimer));
