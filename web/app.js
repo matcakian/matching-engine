@@ -1,10 +1,11 @@
 const currency = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 });
 const openOrders = new Map();
 const activities = [];
-const OPEN_ORDERS_STORAGE_KEY = "matching-engine.open-orders.v1";
-const ACTIVITY_STORAGE_KEY = "matching-engine.activity.v1";
+const OPEN_ORDERS_STORAGE_PREFIX = "matching-engine.open-orders.v2";
+const ACTIVITY_STORAGE_PREFIX = "matching-engine.activity.v2";
 const MAX_ACTIVITY_ENTRIES = 6;
 let pollingTimer;
+let currentUser = null;
 const formatPrice = (cents) => currency.format(cents / 100);
 
 function readStoredJson(key, fallback) {
@@ -32,11 +33,11 @@ function isOpenOrder(value) {
 }
 
 function saveOpenOrders() {
-  writeStoredJson(OPEN_ORDERS_STORAGE_KEY, [...openOrders.values()]);
+  if (currentUser) writeStoredJson(`${OPEN_ORDERS_STORAGE_PREFIX}.${currentUser.id}`, [...openOrders.values()]);
 }
 
 function saveActivities() {
-  writeStoredJson(ACTIVITY_STORAGE_KEY, activities);
+  if (currentUser) writeStoredJson(`${ACTIVITY_STORAGE_PREFIX}.${currentUser.id}`, activities);
 }
 
 function renderLevels(containerId, levels) {
@@ -115,12 +116,13 @@ function addActivity(title, details) {
   renderActivities();
 }
 
-function restoreDashboardState() {
-  const storedOrders = readStoredJson(OPEN_ORDERS_STORAGE_KEY, []);
-  for (const order of Array.isArray(storedOrders) ? storedOrders : []) {
-    if (isOpenOrder(order)) openOrders.set(order.id, order);
+function restoreActivities() {
+  activities.splice(0);
+  if (!currentUser) {
+    renderActivities();
+    return;
   }
-  const storedActivities = readStoredJson(ACTIVITY_STORAGE_KEY, []);
+  const storedActivities = readStoredJson(`${ACTIVITY_STORAGE_PREFIX}.${currentUser.id}`, []);
   for (const activity of Array.isArray(storedActivities) ? storedActivities : []) {
     if (activity && typeof activity.title === "string" && typeof activity.details === "string" &&
         Number.isFinite(Date.parse(activity.createdAt))) {
@@ -128,8 +130,22 @@ function restoreDashboardState() {
     }
   }
   activities.splice(MAX_ACTIVITY_ENTRIES);
-  renderOpenOrders();
   renderActivities();
+}
+
+function setCurrentUser(user) {
+  currentUser = user;
+  openOrders.clear();
+  document.querySelector("#auth-form").classList.toggle("is-hidden", Boolean(user));
+  document.querySelector("#logout").classList.toggle("is-hidden", !user);
+  document.querySelector("#account-heading").textContent = user ? `Signed in as ${user.username}` : "Sign in to trade";
+  document.querySelector("#account-state").textContent = user ? "Active" : "Guest";
+  document.querySelector("#order-message").textContent = user
+    ? "Ready to send orders to the matching engine."
+    : "Sign in to place orders.";
+  document.querySelector("#submit-order").disabled = !user;
+  restoreActivities();
+  renderOpenOrders();
 }
 
 function setConnection(connected) {
@@ -151,7 +167,12 @@ async function loadBook({ announce = false } = {}) {
     setConnection(true);
     document.querySelector("#book-updated").textContent = `Updated ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}`;
     const message = document.querySelector("#order-message");
-    if (message.textContent.startsWith("Connecting")) message.textContent = "Ready to send orders to the local matching engine.";
+    if (message.textContent.startsWith("Connecting")) {
+      message.textContent = currentUser ? "Ready to send orders to the matching engine." : "Sign in to place orders.";
+    }
+    // Another signed-in user may have filled one of this user's resting orders.
+    // Refresh the user-scoped list with the book poll so it stays authoritative.
+    if (currentUser) await loadOpenOrders();
     if (announce) addActivity("Order book refreshed", "Current aggregate depth loaded from the engine.");
   } catch (error) {
     setConnection(false);
@@ -159,11 +180,43 @@ async function loadBook({ announce = false } = {}) {
   }
 }
 
+async function loadOpenOrders() {
+  if (!currentUser) return;
+  try {
+    const payload = await request("/api/orders");
+    openOrders.clear();
+    for (const order of payload.orders) {
+      if (isOpenOrder(order)) openOrders.set(order.id, order);
+    }
+    saveOpenOrders();
+    renderOpenOrders();
+  } catch (error) {
+    if (error.message === "sign in required") setCurrentUser(null);
+    else addActivity("Could not load open orders", error.message);
+  }
+}
+
+async function loadSession() {
+  try {
+    setCurrentUser(await request("/api/session"));
+    await loadOpenOrders();
+  } catch (error) {
+    setCurrentUser(null);
+  }
+}
+
 function renderOpenOrders() {
   const root = document.querySelector("#open-orders");
   const entries = [...openOrders.values()];
-  document.querySelector("#open-order-count").textContent = `${entries.length} open`;
+  document.querySelector("#open-order-count").textContent = currentUser ? `${entries.length} open` : "Sign in";
   root.replaceChildren();
+  if (!currentUser) {
+    const signIn = document.createElement("p");
+    signIn.className = "empty-state";
+    signIn.textContent = "Sign in to view and manage your open orders.";
+    root.append(signIn);
+    return;
+  }
   if (entries.length === 0) {
     const empty = document.createElement("p");
     empty.className = "empty-state";
@@ -214,12 +267,17 @@ async function cancelOrder(id) {
     );
     await loadBook();
   } catch (error) {
+    if (error.message === "sign in required") setCurrentUser(null);
     addActivity(`Could not cancel order #${id}`, error.message);
   }
 }
 
 document.querySelector("#order-form").addEventListener("submit", async (event) => {
   event.preventDefault();
+  if (!currentUser) {
+    document.querySelector("#order-message").textContent = "Sign in to place orders.";
+    return;
+  }
   const form = new FormData(event.currentTarget);
   const price = parseCents(form.get("price"));
   const quantity = Number(form.get("quantity"));
@@ -263,10 +321,61 @@ document.querySelector("#order-form").addEventListener("submit", async (event) =
     await loadBook();
   } catch (error) {
     message.textContent = error.message;
+    if (error.message === "sign in required") setCurrentUser(null);
     setConnection(false);
   } finally {
-    button.disabled = false;
+    button.disabled = !currentUser;
     button.textContent = `Place ${form.get("side")} order`;
+  }
+});
+
+async function authenticate(path) {
+  const form = document.querySelector("#auth-form");
+  const credentials = new FormData(form);
+  const message = document.querySelector("#auth-message");
+  const loginButton = document.querySelector("#login");
+  const registerButton = document.querySelector("#register");
+  const username = String(credentials.get("username") ?? "").trim();
+  const password = String(credentials.get("password") ?? "");
+  if (!username || !password) {
+    message.textContent = "Enter a username and password.";
+    return;
+  }
+  loginButton.disabled = true;
+  registerButton.disabled = true;
+  try {
+    const user = await request(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    form.reset();
+    setCurrentUser(user);
+    message.textContent = path === "/api/register" ? "Account created. You can now place orders." : "Signed in. You can now place orders.";
+    await loadOpenOrders();
+  } catch (error) {
+    message.textContent = error.message;
+  } finally {
+    loginButton.disabled = false;
+    registerButton.disabled = false;
+  }
+}
+
+document.querySelector("#auth-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  authenticate("/api/login");
+});
+
+document.querySelector("#register").addEventListener("click", () => authenticate("/api/register"));
+
+document.querySelector("#logout").addEventListener("click", async () => {
+  const message = document.querySelector("#auth-message");
+  try {
+    await request("/api/logout", { method: "POST" });
+    setCurrentUser(null);
+    message.textContent = "Signed out.";
+  } catch (error) {
+    message.textContent = error.message;
   }
 });
 
@@ -275,7 +384,8 @@ document.querySelector("#side").addEventListener("change", (event) => {
 });
 document.querySelector("#price").addEventListener("change", formatPriceInput);
 
-restoreDashboardState();
+setCurrentUser(null);
 loadBook();
+loadSession();
 pollingTimer = window.setInterval(loadBook, 2_500);
 window.addEventListener("beforeunload", () => window.clearInterval(pollingTimer));

@@ -1,4 +1,5 @@
 #include "matching_engine/order_book.hpp"
+#include "matching_engine/user_store.hpp"
 
 #include <arpa/inet.h>
 #include <cerrno>
@@ -16,6 +17,7 @@
 #include <string_view>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <utility>
 
 namespace {
 
@@ -27,11 +29,17 @@ using matching_engine::Price;
 using matching_engine::Quantity;
 using matching_engine::Side;
 using matching_engine::Trade;
+using matching_engine::UserId;
+using matching_engine::UserStore;
 
 struct Response {
     int status;
     std::string type;
     std::string body;
+    std::string headers;
+
+    Response(int response_status, std::string response_type, std::string response_body, std::string response_headers = {})
+        : status(response_status), type(std::move(response_type)), body(std::move(response_body)), headers(std::move(response_headers)) {}
 };
 
 // Escape the few characters that would otherwise make a JSON string invalid.
@@ -50,6 +58,35 @@ std::string json_escape(std::string_view value) {
     }
     return escaped;
 }
+
+// Return the value of a simple cookie name from a request Cookie header. Session
+// tokens are hex encoded, so they cannot contain cookie separators.
+std::optional<std::string> cookie_value(std::string_view cookies, std::string_view name) {
+    std::size_t start = 0;
+    while (start < cookies.size()) {
+        const std::size_t end = cookies.find(';', start);
+        const auto pair = cookies.substr(start, end == std::string_view::npos ? cookies.size() - start : end - start);
+        const std::size_t equals = pair.find('=');
+        if (equals != std::string_view::npos) {
+            const auto key = pair.substr(0, equals);
+            const auto value = pair.substr(equals + 1);
+            const std::size_t first = key.find_first_not_of(" \t");
+            if (first != std::string_view::npos && key.substr(first) == name) return std::string(value);
+        }
+        if (end == std::string_view::npos) break;
+        start = end + 1;
+    }
+    return std::nullopt;
+}
+
+std::string session_cookie(std::string_view token) {
+    // Secure is deliberately omitted for the loopback-only HTTP development
+    // server. A production HTTPS deployment must add the Secure attribute.
+    return "Set-Cookie: session=" + std::string(token) + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400\r\n";
+}
+
+constexpr std::string_view expired_session_cookie =
+    "Set-Cookie: session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0\r\n";
 
 // Serialize an ordered collection of aggregated book levels for an API response.
 std::string levels_json(const std::vector<BookLevel>& levels) {
@@ -78,7 +115,9 @@ std::string trades_json(const std::vector<Trade>& trades) {
     return output << ']', output.str();
 }
 
-// Extract a quoted field from the small, known JSON payloads accepted by this server.
+// Extract a JSON string field from the small, known payloads accepted by this
+// server. Handling escapes keeps passwords containing quotes or backslashes
+// intact when the browser serializes them with JSON.stringify.
 std::optional<std::string> string_field(std::string_view json, std::string_view name) {
     const std::string key = '"' + std::string(name) + '"';
     const std::size_t key_at = json.find(key);
@@ -87,9 +126,32 @@ std::optional<std::string> string_field(std::string_view json, std::string_view 
     if (colon == std::string_view::npos) return std::nullopt;
     const std::size_t opening_quote = json.find('"', colon + 1);
     if (opening_quote == std::string_view::npos) return std::nullopt;
-    const std::size_t closing_quote = json.find('"', opening_quote + 1);
-    if (closing_quote == std::string_view::npos) return std::nullopt;
-    return std::string(json.substr(opening_quote + 1, closing_quote - opening_quote - 1));
+    std::string value;
+    for (std::size_t index = opening_quote + 1; index < json.size(); ++index) {
+        const char character = json[index];
+        if (character == '"') return value;
+        if (character != '\\') {
+            value += character;
+            continue;
+        }
+        if (++index == json.size()) return std::nullopt;
+        switch (json[index]) {
+        case '"': value += '"'; break;
+        case '\\': value += '\\'; break;
+        case '/': value += '/'; break;
+        case 'b': value += '\b'; break;
+        case 'f': value += '\f'; break;
+        case 'n': value += '\n'; break;
+        case 'r': value += '\r'; break;
+        case 't': value += '\t'; break;
+        // Browser-submitted credentials are UTF-8, so JSON.stringify does not
+        // need this escape form. Rejecting it is safer than silently changing a
+        // password's bytes in this deliberately small parser.
+        case 'u': return std::nullopt;
+        default: return std::nullopt;
+        }
+    }
+    return std::nullopt;
 }
 
 template <typename Integer>
@@ -128,31 +190,51 @@ std::string read_file(const std::filesystem::path& path) {
 
 class EngineServer {
 public:
-    // Create the book service and seed it with enough depth for an immediately useful UI.
-    explicit EngineServer(std::filesystem::path web_root) : web_root_(std::move(web_root)) {
-        // A compact initial market makes the page useful as soon as it opens.
-        submit_seed({1, Side::Sell, 10'075, 50});
-        submit_seed({2, Side::Sell, 10'100, 120});
-        submit_seed({3, Side::Sell, 10'150, 80});
-        submit_seed({4, Side::Buy, 10'050, 75});
-        submit_seed({5, Side::Buy, 10'000, 140});
-        submit_seed({6, Side::Buy, 9'950, 60});
+    // Rebuild the in-memory book from durable resting orders. The initial
+    // illustrative liquidity is inserted only on a brand-new database.
+    EngineServer(std::filesystem::path web_root, const std::string& database_path)
+        : web_root_(std::move(web_root)), users_(database_path) {
+        if (!users_.has_orders()) {
+            submit_seed({1, Side::Sell, 10'075, 50});
+            submit_seed({2, Side::Sell, 10'100, 120});
+            submit_seed({3, Side::Sell, 10'150, 80});
+            submit_seed({4, Side::Buy, 10'050, 75});
+            submit_seed({5, Side::Buy, 10'000, 140});
+            submit_seed({6, Side::Buy, 9'950, 60});
+        }
+        for (const auto& stored : users_.open_orders()) {
+            book_.submit(stored.order);
+        }
+        next_order_id_ = users_.next_order_id();
     }
 
     // Dispatch the parsed HTTP request to an API endpoint or a static web asset.
-    Response handle(std::string_view method, std::string_view path, std::string_view body) {
+    Response handle(std::string_view method, std::string_view path, std::string_view body, std::string_view cookies) {
+        if (method == "POST" && path == "/api/register") return register_user(body);
+        if (method == "POST" && path == "/api/login") return login(body);
+        if (method == "POST" && path == "/api/logout") return logout(cookies);
+        if (method == "GET" && path == "/api/session") return session_response(cookies);
         if (method == "GET" && path == "/api/book") return book_response();
-        if (method == "POST" && path == "/api/orders") return submit_order(body);
-        if (method == "DELETE" && path.starts_with("/api/orders/")) return cancel_order(path);
+
+        const bool protected_order_route = (method == "GET" && path == "/api/orders") ||
+            (method == "POST" && path == "/api/orders") ||
+            (method == "DELETE" && path.starts_with("/api/orders/"));
+        if (protected_order_route) {
+            const auto user = authenticated_user(cookies);
+            if (!user) return {401, "application/json", R"({"error":"sign in required"})"};
+            if (method == "GET") return open_orders_response(user->id);
+            if (method == "POST") return submit_order(body, user->id);
+            return cancel_order(path, user->id);
+        }
         if (method == "GET") return static_file(path);
         return {404, "application/json", R"({"error":"not found"})"};
     }
 
 private:
-    // Submit initial liquidity and advance generated IDs beyond the seeded order.
+    // Persist initial liquidity; the store assigns the next order ID after all
+    // seed rows are present.
     void submit_seed(Order order) {
-        book_.submit(order);
-        next_order_id_ = std::max(next_order_id_, order.id + 1);
+        users_.add_seed_order(order);
     }
 
     // Return the current aggregate depth plus the most recently generated fill.
@@ -171,8 +253,9 @@ private:
         return {200, "application/json", output.str()};
     }
 
-    // Validate a browser order payload, submit it to OrderBook, and report its outcome.
-    Response submit_order(std::string_view body) {
+    // Validate a browser order payload, attach its authenticated owner, and
+    // persist its resulting resting/fill state alongside the in-memory book.
+    Response submit_order(std::string_view body, UserId owner_id) {
         const auto side_text = string_field(body, "side");
         const auto price = integer_field<Price>(body, "price");
         const auto quantity = integer_field<Quantity>(body, "quantity");
@@ -180,12 +263,14 @@ private:
             return {400, "application/json", R"({"error":"side, price, and quantity are required"})"};
         }
 
-        const auto requested_id = integer_field<OrderId>(body, "id");
-        const OrderId id = requested_id.value_or(next_order_id_++);
-        if (requested_id && id >= next_order_id_) next_order_id_ = id + 1;
+        // IDs are server-assigned so a client cannot collide with or probe
+        // another user's historical orders.
+        const OrderId id = next_order_id_++;
 
         try {
-            const auto result = book_.submit({id, *side_text == "buy" ? Side::Buy : Side::Sell, *price, *quantity});
+            const Order order{id, *side_text == "buy" ? Side::Buy : Side::Sell, *price, *quantity};
+            const auto result = book_.submit(order);
+            users_.record_submission(owner_id, order, result);
             if (!result.trades.empty()) last_trade_ = result.trades.back();
             std::ostringstream output;
             output << R"({"id":)" << id
@@ -196,19 +281,92 @@ private:
             return {201, "application/json", output.str()};
         } catch (const std::invalid_argument& error) {
             return {400, "application/json", "{\"error\":\"" + json_escape(error.what()) + "\"}"};
+        } catch (const std::exception&) {
+            return {500, "application/json", R"({"error":"could not persist order"})"};
         }
     }
 
-    // Parse an order ID from the REST path and remove that resting order if present.
-    Response cancel_order(std::string_view path) {
+    // Parse an order ID and cancel it only when the signed-in user owns it.
+    Response cancel_order(std::string_view path, UserId owner_id) {
         const auto id_text = path.substr(std::string_view("/api/orders/").size());
         OrderId id{};
         const auto [pointer, error] = std::from_chars(id_text.data(), id_text.data() + id_text.size(), id);
         if (error != std::errc{} || pointer != id_text.data() + id_text.size()) {
             return {400, "application/json", R"({"error":"invalid order id"})"};
         }
+        if (!users_.user_owns_open_order(owner_id, id)) {
+            return {404, "application/json", R"({"error":"order not found"})"};
+        }
         if (!book_.cancel(id)) return {404, "application/json", R"({"error":"order not found"})"};
+        users_.mark_cancelled(owner_id, id);
         return {200, "application/json", R"({"cancelled":true})"};
+    }
+
+    Response register_user(std::string_view body) {
+        const auto username = string_field(body, "username");
+        const auto password = string_field(body, "password");
+        if (!username || !password) return {400, "application/json", R"({"error":"username and password are required"})"};
+        const auto result = users_.register_user(*username, *password);
+        if (!result.session) {
+            switch (result.error) {
+            case matching_engine::AuthenticationError::InvalidUsername:
+                return {400, "application/json", R"({"error":"username must be 3-64 letters, numbers, dots, dashes, or underscores"})"};
+            case matching_engine::AuthenticationError::InvalidPassword:
+                return {400, "application/json", R"({"error":"password must be 12-256 characters"})"};
+            case matching_engine::AuthenticationError::UsernameTaken:
+                return {409, "application/json", R"({"error":"username is already taken"})"};
+            default:
+                return {400, "application/json", R"({"error":"could not create account"})"};
+            }
+        }
+        return authenticated_response(*result.session, 201);
+    }
+
+    Response login(std::string_view body) {
+        const auto username = string_field(body, "username");
+        const auto password = string_field(body, "password");
+        if (!username || !password) return {400, "application/json", R"({"error":"username and password are required"})"};
+        const auto result = users_.login(*username, *password);
+        if (!result.session) return {401, "application/json", R"({"error":"invalid username or password"})"};
+        return authenticated_response(*result.session, 200);
+    }
+
+    Response logout(std::string_view cookies) {
+        if (const auto token = cookie_value(cookies, "session")) users_.logout(*token);
+        return {200, "application/json", R"({"loggedOut":true})", std::string(expired_session_cookie)};
+    }
+
+    std::optional<matching_engine::AuthenticatedUser> authenticated_user(std::string_view cookies) const {
+        const auto token = cookie_value(cookies, "session");
+        return token ? users_.authenticate(*token) : std::nullopt;
+    }
+
+    Response session_response(std::string_view cookies) const {
+        const auto user = authenticated_user(cookies);
+        if (!user) return {401, "application/json", R"({"error":"sign in required"})"};
+        return {200, "application/json", "{\"id\":" + std::to_string(user->id) +
+            ",\"username\":\"" + json_escape(user->username) + "\"}"};
+    }
+
+    Response authenticated_response(const matching_engine::Session& session, int status) const {
+        return {status, "application/json", "{\"id\":" + std::to_string(session.user.id) +
+            ",\"username\":\"" + json_escape(session.user.username) + "\"}", session_cookie(session.token)};
+    }
+
+    Response open_orders_response(UserId owner_id) const {
+        const auto orders = users_.open_orders_for_user(owner_id);
+        std::ostringstream output;
+        output << R"({"orders":[)";
+        for (std::size_t index = 0; index < orders.size(); ++index) {
+            if (index != 0) output << ',';
+            const auto& order = orders[index].order;
+            output << R"({"id":)" << order.id
+                   << R"(,"side":")" << (order.side == Side::Buy ? "buy" : "sell")
+                   << R"(","price":)" << order.price
+                   << R"(,"quantity":)" << order.quantity << '}';
+        }
+        output << "]}";
+        return {200, "application/json", output.str()};
     }
 
     // Safely resolve and serve a browser asset while rejecting traversal attempts.
@@ -223,6 +381,7 @@ private:
     }
 
     std::filesystem::path web_root_;
+    UserStore users_;
     OrderBook book_;
     OrderId next_order_id_ = 1;
     std::optional<Trade> last_trade_;
@@ -255,13 +414,38 @@ std::string receive_request(int socket) {
     return request;
 }
 
+// Extract one HTTP header after a request has been fully received. The browser
+// sends canonical header casing for Cookie; supporting that exact form keeps the
+// small local HTTP bridge intentionally narrow.
+std::string request_header(std::string_view request, std::string_view name) {
+    const std::size_t header_end = request.find("\r\n\r\n");
+    const std::size_t first_line_end = request.find("\r\n");
+    if (header_end == std::string_view::npos || first_line_end == std::string_view::npos) return {};
+    std::size_t line_start = first_line_end + 2;
+    while (line_start < header_end) {
+        const std::size_t line_end = request.find("\r\n", line_start);
+        const auto line = request.substr(line_start, line_end - line_start);
+        const std::size_t colon = line.find(':');
+        if (colon != std::string_view::npos && line.substr(0, colon) == name) {
+            const std::size_t value_start = line.find_first_not_of(" \t", colon + 1);
+            return value_start == std::string_view::npos ? "" : std::string(line.substr(value_start));
+        }
+        if (line_end == std::string_view::npos || line_end >= header_end) break;
+        line_start = line_end + 2;
+    }
+    return {};
+}
+
 // Build a minimal HTTP/1.1 response and keep writing until the client has all bytes.
 void send_response(int socket, const Response& response) {
     const std::string status_text = response.status == 200 ? "OK" : response.status == 201 ? "Created" :
-                                    response.status == 400 ? "Bad Request" : "Not Found";
+                                    response.status == 400 ? "Bad Request" : response.status == 401 ? "Unauthorized" :
+                                    response.status == 409 ? "Conflict" : response.status == 500 ? "Internal Server Error" :
+                                    "Not Found";
     const std::string header = "HTTP/1.1 " + std::to_string(response.status) + ' ' + status_text + "\r\n"
         "Content-Type: " + response.type + "\r\n"
-        "Content-Length: " + std::to_string(response.body.size()) + "\r\n"
+        + response.headers
+        + "Content-Length: " + std::to_string(response.body.size()) + "\r\n"
         "Connection: close\r\n\r\n";
     const std::string payload = header + response.body;
     std::size_t written = 0;
@@ -278,6 +462,7 @@ void send_response(int socket, const Response& response) {
 int main(int argc, char* argv[]) {
     const int port = argc > 1 ? std::stoi(argv[1]) : 8080;
     const std::filesystem::path web_root = argc > 2 ? argv[2] : "web";
+    const std::string database_path = argc > 3 ? argv[3] : "matching_engine.db";
     if (!std::filesystem::is_directory(web_root)) {
         std::cerr << "Web root does not exist: " << web_root << '\n';
         return 1;
@@ -299,7 +484,7 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "Matching engine UI available at http://127.0.0.1:" << port << '\n';
-    EngineServer server(web_root);
+    EngineServer server(web_root, database_path);
     while (true) {
         const int client = accept(listener, nullptr, nullptr);
         if (client < 0) {
@@ -316,7 +501,7 @@ int main(int argc, char* argv[]) {
                 std::istringstream line(request.substr(0, first_line_end));
                 std::string method, path, version;
                 line >> method >> path >> version;
-                send_response(client, server.handle(method, path, request.substr(header_end + 4)));
+                send_response(client, server.handle(method, path, request.substr(header_end + 4), request_header(request, "Cookie")));
             }
         } catch (const std::exception& error) {
             send_response(client, {400, "application/json", "{\"error\":\"" + json_escape(error.what()) + "\"}"});

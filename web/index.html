@@ -41,6 +41,24 @@
         </article>
 
         <aside class="side-panels">
+          <section class="panel account-panel">
+            <div class="panel-heading"><div><p class="eyebrow">Account</p><h2 id="account-heading">Sign in to trade</h2></div><span id="account-state" class="muted">Guest</span></div>
+            <form id="auth-form">
+              <label>Username
+                <input id="username" name="username" type="text" minlength="3" maxlength="64" autocomplete="username" required />
+              </label>
+              <label>Password
+                <input id="password" name="password" type="password" minlength="12" maxlength="256" autocomplete="current-password" required />
+              </label>
+              <div class="form-row auth-actions">
+                <button id="login" type="submit">Sign in</button>
+                <button id="register" class="secondary-button" type="button">Create account</button>
+              </div>
+            </form>
+            <button id="logout" class="cancel-order is-hidden" type="button">Sign out</button>
+            <p id="auth-message" class="form-message" role="status">Create an account or sign in to place and manage orders.</p>
+          </section>
+
           <section class="panel ticket-panel">
             <div class="panel-heading"><div><p class="eyebrow">Order entry</p><h2>New limit order</h2></div><span class="market-tag">USD</span></div>
             <form id="order-form">
@@ -55,9 +73,9 @@
                   <input id="quantity" name="quantity" type="number" min="1" step="1" value="10" required />
                 </label>
               </div>
-              <button id="submit-order" type="submit">Place buy order</button>
+              <button id="submit-order" type="submit" disabled>Place buy order</button>
             </form>
-            <p id="order-message" class="form-message" role="status">Connecting to the local matching engine…</p>
+            <p id="order-message" class="form-message" role="status">Sign in to place orders.</p>
           </section>
 
           <section class="panel activity-panel">

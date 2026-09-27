@@ -54,6 +54,9 @@ button { border: 0; background: #65d6a6; color: #0b1712; cursor: pointer; font-w
 button:hover { background: #83e7ba; }
 button:active { transform: translateY(1px); }
 button:disabled { cursor: wait; opacity: .62; }
+.secondary-button { background: transparent; border: 1px solid #4d5d69; color: #c8d3da; }
+.secondary-button:hover { background: #26333e; color: #fff; }
+.is-hidden { display: none; }
 .form-message { min-height: 2.4em; margin-top: 1rem; font-size: .8rem; line-height: 1.45; }
 .activity-list { display: grid; gap: .7rem; list-style: none; padding: 0; margin: 0; }
 .activity-list li { justify-content: space-between; align-items: flex-start; gap: .6rem; padding-bottom: .7rem; border-bottom: 1px solid #26333e; color: #d7dfe6; font-size: .85rem; }
