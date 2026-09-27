@@ -115,6 +115,129 @@ std::string trades_json(const std::vector<Trade>& trades) {
     return output << ']', output.str();
 }
 
+void skip_json_whitespace(std::string_view input, std::size_t& position) {
+    while (position < input.size() && (input[position] == ' ' || input[position] == '\t' ||
+                                      input[position] == '\r' || input[position] == '\n')) {
+        ++position;
+    }
+}
+
+bool parse_json_value(std::string_view input, std::size_t& position);
+
+bool parse_json_string(std::string_view input, std::size_t& position) {
+    if (position == input.size() || input[position++] != '"') return false;
+    while (position < input.size()) {
+        const unsigned char character = input[position++];
+        if (character == '"') return true;
+        if (character < 0x20) return false;
+        if (character != '\\') continue;
+        if (position == input.size()) return false;
+        const char escape = input[position++];
+        if (escape == '"' || escape == '\\' || escape == '/' || escape == 'b' || escape == 'f' ||
+            escape == 'n' || escape == 'r' || escape == 't') continue;
+        if (escape != 'u' || position + 4 > input.size()) return false;
+        for (int index = 0; index < 4; ++index) {
+            const char hex = input[position++];
+            if (!((hex >= '0' && hex <= '9') || (hex >= 'a' && hex <= 'f') || (hex >= 'A' && hex <= 'F'))) return false;
+        }
+    }
+    return false;
+}
+
+bool parse_json_number(std::string_view input, std::size_t& position) {
+    const std::size_t start = position;
+    if (position < input.size() && input[position] == '-') ++position;
+    if (position == input.size()) return false;
+    if (input[position] == '0') {
+        ++position;
+    } else if (input[position] >= '1' && input[position] <= '9') {
+        do { ++position; } while (position < input.size() && input[position] >= '0' && input[position] <= '9');
+    } else {
+        return false;
+    }
+    if (position < input.size() && input[position] == '.') {
+        ++position;
+        const std::size_t fractional_start = position;
+        while (position < input.size() && input[position] >= '0' && input[position] <= '9') ++position;
+        if (position == fractional_start) return false;
+    }
+    if (position < input.size() && (input[position] == 'e' || input[position] == 'E')) {
+        ++position;
+        if (position < input.size() && (input[position] == '+' || input[position] == '-')) ++position;
+        const std::size_t exponent_start = position;
+        while (position < input.size() && input[position] >= '0' && input[position] <= '9') ++position;
+        if (position == exponent_start) return false;
+    }
+    return position > start;
+}
+
+bool parse_json_object(std::string_view input, std::size_t& position) {
+    if (position == input.size() || input[position++] != '{') return false;
+    skip_json_whitespace(input, position);
+    if (position < input.size() && input[position] == '}') {
+        ++position;
+        return true;
+    }
+    while (true) {
+        if (!parse_json_string(input, position)) return false;
+        skip_json_whitespace(input, position);
+        if (position == input.size() || input[position++] != ':') return false;
+        skip_json_whitespace(input, position);
+        if (!parse_json_value(input, position)) return false;
+        skip_json_whitespace(input, position);
+        if (position == input.size()) return false;
+        if (input[position] == '}') {
+            ++position;
+            return true;
+        }
+        if (input[position++] != ',') return false;
+        skip_json_whitespace(input, position);
+    }
+}
+
+bool parse_json_array(std::string_view input, std::size_t& position) {
+    if (position == input.size() || input[position++] != '[') return false;
+    skip_json_whitespace(input, position);
+    if (position < input.size() && input[position] == ']') {
+        ++position;
+        return true;
+    }
+    while (true) {
+        if (!parse_json_value(input, position)) return false;
+        skip_json_whitespace(input, position);
+        if (position == input.size()) return false;
+        if (input[position] == ']') {
+            ++position;
+            return true;
+        }
+        if (input[position++] != ',') return false;
+        skip_json_whitespace(input, position);
+    }
+}
+
+bool parse_json_value(std::string_view input, std::size_t& position) {
+    skip_json_whitespace(input, position);
+    if (position == input.size()) return false;
+    if (input[position] == '"') return parse_json_string(input, position);
+    if (input[position] == '{') return parse_json_object(input, position);
+    if (input[position] == '[') return parse_json_array(input, position);
+    if (input.substr(position, 4) == "true") { position += 4; return true; }
+    if (input.substr(position, 5) == "false") { position += 5; return true; }
+    if (input.substr(position, 4) == "null") { position += 4; return true; }
+    return parse_json_number(input, position);
+}
+
+// Validate the full body before extracting fields. Individual field readers are
+// intentionally small, so they should never accept a valid prefix of malformed
+// JSON (for example a missing closing brace or comma).
+bool is_json_object(std::string_view input) {
+    std::size_t position = 0;
+    skip_json_whitespace(input, position);
+    if (position == input.size() || input[position] != '{' || !parse_json_object(input, position)) return false;
+    skip_json_whitespace(input, position);
+    return position == input.size();
+}
+
 // Extract a JSON string field from the small, known payloads accepted by this
 // server. Handling escapes keeps passwords containing quotes or backslashes
 // intact when the browser serializes them with JSON.stringify.
@@ -165,6 +288,11 @@ std::optional<Integer> integer_field(std::string_view json, std::string_view nam
     const std::size_t first = json.find_first_not_of(" \t\r\n", colon + 1);
     if (first == std::string_view::npos) return std::nullopt;
     const std::size_t last = json.find_first_not_of("-0123456789", first);
+    // A field stored in integer cents/units cannot accept a decimal or
+    // exponent suffix by silently parsing only its whole-number prefix.
+    if (last != std::string_view::npos && (json[last] == '.' || json[last] == 'e' || json[last] == 'E')) {
+        return std::nullopt;
+    }
     const auto token = json.substr(first, last - first);
     Integer result{};
     const auto [pointer, error] = std::from_chars(token.data(), token.data() + token.size(), result);
@@ -256,10 +384,14 @@ private:
     // Validate a browser order payload, attach its authenticated owner, and
     // persist its resulting resting/fill state alongside the in-memory book.
     Response submit_order(std::string_view body, UserId owner_id) {
+        if (!is_json_object(body)) {
+            return {400, "application/json", R"({"error":"request body must be a JSON object"})"};
+        }
         const auto side_text = string_field(body, "side");
         const auto price = integer_field<Price>(body, "price");
         const auto quantity = integer_field<Quantity>(body, "quantity");
-        if (!side_text || !price || !quantity || (*side_text != "buy" && *side_text != "sell")) {
+        if (!side_text || !price || !quantity || *price <= 0 || *quantity <= 0 ||
+            (*side_text != "buy" && *side_text != "sell")) {
             return {400, "application/json", R"({"error":"side, price, and quantity are required"})"};
         }
 
@@ -303,6 +435,9 @@ private:
     }
 
     Response register_user(std::string_view body) {
+        if (!is_json_object(body)) {
+            return {400, "application/json", R"({"error":"request body must be a JSON object"})"};
+        }
         const auto username = string_field(body, "username");
         const auto password = string_field(body, "password");
         if (!username || !password) return {400, "application/json", R"({"error":"username and password are required"})"};
@@ -323,6 +458,9 @@ private:
     }
 
     Response login(std::string_view body) {
+        if (!is_json_object(body)) {
+            return {400, "application/json", R"({"error":"request body must be a JSON object"})"};
+        }
         const auto username = string_field(body, "username");
         const auto password = string_field(body, "password");
         if (!username || !password) return {400, "application/json", R"({"error":"username and password are required"})"};
@@ -388,6 +526,7 @@ private:
 };
 
 // Read one HTTP request, waiting until its declared body has arrived when present.
+#ifndef MATCHING_ENGINE_HTTP_SERVER_TEST
 std::string receive_request(int socket) {
     std::string request;
     char buffer[4096];
@@ -413,6 +552,7 @@ std::string receive_request(int socket) {
     }
     return request;
 }
+#endif
 
 // Extract one HTTP header after a request has been fully received. The browser
 // sends canonical header casing for Cookie; supporting that exact form keeps the
@@ -437,6 +577,7 @@ std::string request_header(std::string_view request, std::string_view name) {
 }
 
 // Build a minimal HTTP/1.1 response and keep writing until the client has all bytes.
+#ifndef MATCHING_ENGINE_HTTP_SERVER_TEST
 void send_response(int socket, const Response& response) {
     const std::string status_text = response.status == 200 ? "OK" : response.status == 201 ? "Created" :
                                     response.status == 400 ? "Bad Request" : response.status == 401 ? "Unauthorized" :
@@ -455,10 +596,12 @@ void send_response(int socket, const Response& response) {
         written += static_cast<std::size_t>(result);
     }
 }
+#endif
 
 } // namespace
 
 // Start a loopback-only server and process one browser request at a time.
+#ifndef MATCHING_ENGINE_HTTP_SERVER_TEST
 int main(int argc, char* argv[]) {
     const int port = argc > 1 ? std::stoi(argv[1]) : 8080;
     const std::filesystem::path web_root = argc > 2 ? argv[2] : "web";
@@ -510,3 +653,4 @@ int main(int argc, char* argv[]) {
     }
     close(listener);
 }
+#endif
