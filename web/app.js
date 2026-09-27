@@ -1,7 +1,43 @@
 const currency = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 });
 const openOrders = new Map();
+const activities = [];
+const OPEN_ORDERS_STORAGE_KEY = "matching-engine.open-orders.v1";
+const ACTIVITY_STORAGE_KEY = "matching-engine.activity.v1";
+const MAX_ACTIVITY_ENTRIES = 6;
 let pollingTimer;
 const formatPrice = (cents) => currency.format(cents / 100);
+
+function readStoredJson(key, fallback) {
+  try {
+    const stored = window.localStorage.getItem(key);
+    return stored === null ? fallback : JSON.parse(stored);
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStoredJson(key, value) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // The dashboard remains usable when browser storage is unavailable.
+  }
+}
+
+function isOpenOrder(value) {
+  return value && Number.isSafeInteger(value.id) && value.id > 0 &&
+    (value.side === "buy" || value.side === "sell") &&
+    Number.isSafeInteger(value.price) && value.price > 0 &&
+    Number.isSafeInteger(value.quantity) && value.quantity > 0;
+}
+
+function saveOpenOrders() {
+  writeStoredJson(OPEN_ORDERS_STORAGE_KEY, [...openOrders.values()]);
+}
+
+function saveActivities() {
+  writeStoredJson(ACTIVITY_STORAGE_KEY, activities);
+}
 
 function renderLevels(containerId, levels) {
   const container = document.querySelector(containerId);
@@ -50,24 +86,50 @@ function formatPriceInput(event) {
   if (cents !== undefined && cents > 0) event.currentTarget.value = (cents / 100).toFixed(2);
 }
 
-function addActivity(title, details) {
-  const entry = document.createElement("li");
-  const content = document.createElement("div");
-  const text = document.createElement("strong");
-  const time = document.createElement("time");
-  text.textContent = title;
-  time.textContent = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  content.append(text);
-  if (details) {
-    const detail = document.createElement("span");
-    detail.className = "activity-detail";
-    detail.textContent = details;
-    content.append(detail);
-  }
-  entry.append(content, time);
+function renderActivities() {
   const activity = document.querySelector("#activity");
-  activity.prepend(entry);
-  while (activity.children.length > 6) activity.lastElementChild.remove();
+  activity.replaceChildren();
+  for (const item of activities) {
+    const entry = document.createElement("li");
+    const content = document.createElement("div");
+    const text = document.createElement("strong");
+    const time = document.createElement("time");
+    text.textContent = item.title;
+    time.textContent = new Date(item.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    content.append(text);
+    if (item.details) {
+      const detail = document.createElement("span");
+      detail.className = "activity-detail";
+      detail.textContent = item.details;
+      content.append(detail);
+    }
+    entry.append(content, time);
+    activity.append(entry);
+  }
+}
+
+function addActivity(title, details) {
+  activities.unshift({ title, details, createdAt: new Date().toISOString() });
+  activities.splice(MAX_ACTIVITY_ENTRIES);
+  saveActivities();
+  renderActivities();
+}
+
+function restoreDashboardState() {
+  const storedOrders = readStoredJson(OPEN_ORDERS_STORAGE_KEY, []);
+  for (const order of Array.isArray(storedOrders) ? storedOrders : []) {
+    if (isOpenOrder(order)) openOrders.set(order.id, order);
+  }
+  const storedActivities = readStoredJson(ACTIVITY_STORAGE_KEY, []);
+  for (const activity of Array.isArray(storedActivities) ? storedActivities : []) {
+    if (activity && typeof activity.title === "string" && typeof activity.details === "string" &&
+        Number.isFinite(Date.parse(activity.createdAt))) {
+      activities.push(activity);
+    }
+  }
+  activities.splice(MAX_ACTIVITY_ENTRIES);
+  renderOpenOrders();
+  renderActivities();
 }
 
 function setConnection(connected) {
@@ -136,6 +198,7 @@ function applyFillsToOpenOrders(trades) {
     restingOrder.quantity -= trade.quantity;
     if (restingOrder.quantity <= 0) openOrders.delete(trade.restingOrderId);
   }
+  saveOpenOrders();
 }
 
 async function cancelOrder(id) {
@@ -143,6 +206,7 @@ async function cancelOrder(id) {
     await request(`/api/orders/${id}`, { method: "DELETE" });
     const order = openOrders.get(id);
     openOrders.delete(id);
+    saveOpenOrders();
     renderOpenOrders();
     addActivity(
       `Cancelled ${order.side.toUpperCase()} order #${id}`,
@@ -178,6 +242,7 @@ document.querySelector("#order-form").addEventListener("submit", async (event) =
     if (result.resting) {
       openOrders.set(result.id, { id: result.id, ...order, quantity: result.remainingQuantity });
     }
+    saveOpenOrders();
     renderOpenOrders();
     const fills = result.trades.length;
     const filledQuantity = result.trades.reduce((total, trade) => total + trade.quantity, 0);
@@ -210,6 +275,7 @@ document.querySelector("#side").addEventListener("change", (event) => {
 });
 document.querySelector("#price").addEventListener("change", formatPriceInput);
 
+restoreDashboardState();
 loadBook();
 pollingTimer = window.setInterval(loadBook, 2_500);
 window.addEventListener("beforeunload", () => window.clearInterval(pollingTimer));
