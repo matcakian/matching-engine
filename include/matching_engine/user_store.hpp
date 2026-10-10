@@ -13,7 +13,7 @@ struct sqlite3;
 
 namespace matching_engine {
 
-using UserId = std::uint64_t;
+using UserId = OwnerId;
 
 struct AuthenticatedUser {
     UserId id;

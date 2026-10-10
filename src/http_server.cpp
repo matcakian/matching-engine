@@ -331,7 +331,7 @@ public:
             submit_seed({6, Side::Buy, 9'950, 60});
         }
         for (const auto& stored : users_.open_orders()) {
-            book_.submit(stored.order);
+            book_.submit(stored.order, stored.owner_id);
         }
         next_order_id_ = users_.next_order_id();
     }
@@ -401,7 +401,7 @@ private:
 
         try {
             const Order order{id, *side_text == "buy" ? Side::Buy : Side::Sell, *price, *quantity};
-            const auto result = book_.submit(order);
+            const auto result = book_.submit(order, owner_id);
             users_.record_submission(owner_id, order, result);
             if (!result.trades.empty()) last_trade_ = result.trades.back();
             std::ostringstream output;

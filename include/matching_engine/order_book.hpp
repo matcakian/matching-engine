@@ -12,6 +12,9 @@ namespace matching_engine {
 
 // Named integer types make the roles of otherwise identical numbers explicit.
 using OrderId = std::uint64_t;
+// A stable account identifier used to prevent an owner from trading with
+// itself. Seed liquidity intentionally has no owner.
+using OwnerId = std::uint64_t;
 // Prices are stored as cents (for example, 10'050 represents $100.50), avoiding
 // the rounding errors that can come from using floating-point currency values.
 using Price = std::int64_t;
@@ -48,7 +51,8 @@ struct BookLevel {
 class OrderBook {
 public:
     // Validate and match a new limit order, then store any unfilled portion.
-    SubmitResult submit(Order order);
+    // Orders sharing a non-empty owner ID never match each other.
+    SubmitResult submit(Order order, std::optional<OwnerId> owner_id = std::nullopt);
     // Remove a resting order by ID. Returns false when the ID is not in the book.
     bool cancel(OrderId id);
 
@@ -64,6 +68,7 @@ private:
     // among orders that share one price. The vector order provides that priority.
     struct RestingOrder {
         Order order;
+        std::optional<OwnerId> owner_id;
         std::uint64_t sequence;
     };
 
@@ -81,7 +86,7 @@ private:
     // Reject malformed orders and IDs that already exist in the book.
     void validate(const Order& order) const;
     // Add an unmatched order to its price-level FIFO queue.
-    void rest(Order order);
+    void rest(Order order, std::optional<OwnerId> owner_id);
 };
 
 // Convert a price stored in cents into a fixed two-decimal display string.

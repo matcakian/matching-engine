@@ -26,13 +26,13 @@ void OrderBook::validate(const Order& order) const {
     }
 }
 
-void OrderBook::rest(Order order) {
+void OrderBook::rest(Order order, std::optional<OwnerId> owner_id) {
     // Save these fields before `order` is moved into the price-level queue below.
     const auto side = order.side;
     const auto id = order.id;
     // Record an arrival sequence, then transfer ownership of the order to the
     // selected price-level queue. The queue's insertion order enforces FIFO.
-    RestingOrder resting{std::move(order), next_sequence_++};
+    RestingOrder resting{std::move(order), owner_id, next_sequence_++};
     if (side == Side::Buy) {
         // operator[] creates the price level when this is its first bid.
         bids_[resting.order.price].push_back(std::move(resting));
@@ -44,7 +44,7 @@ void OrderBook::rest(Order order) {
     order_sides_[id] = side;
 }
 
-SubmitResult OrderBook::submit(Order order) {
+SubmitResult OrderBook::submit(Order order, std::optional<OwnerId> owner_id) {
     // Reject invalid input before changing any book state.
     validate(order);
     // Start with the whole incoming order unfilled and no resting remainder.
@@ -53,54 +53,71 @@ SubmitResult OrderBook::submit(Order order) {
     if (order.side == Side::Buy) {
         // A buyer may match only asks no more expensive than its limit. Since
         // asks are ascending, begin() is always the next best eligible level.
-        while (result.remaining_quantity > 0 && !asks_.empty() &&
-               asks_.begin()->first <= order.price) {
-            auto level = asks_.begin();
+        auto level = asks_.begin();
+        while (result.remaining_quantity > 0 && level != asks_.end() &&
+               level->first <= order.price) {
             auto& queue = level->second;
-            // Consume the oldest orders at this price before moving to a worse ask.
-            while (result.remaining_quantity > 0 && !queue.empty()) {
-                auto& resting = queue.front();
+            // Consume eligible orders in arrival order. A user's own resting
+            // order remains available to other participants but cannot fill
+            // this incoming order.
+            for (auto resting = queue.begin();
+                 result.remaining_quantity > 0 && resting != queue.end();) {
+                if (owner_id && resting->owner_id && *owner_id == *resting->owner_id) {
+                    ++resting;
+                    continue;
+                }
                 // A fill cannot exceed either order's remaining quantity.
-                const Quantity fill = std::min(result.remaining_quantity, resting.order.quantity);
+                const Quantity fill = std::min(result.remaining_quantity, resting->order.quantity);
                 // Trades execute at the resting order's price under price-time priority.
-                result.trades.push_back({resting.order.id, order.id, resting.order.price, fill});
+                result.trades.push_back({resting->order.id, order.id, resting->order.price, fill});
                 // Decrease both sides by the quantity just traded.
                 result.remaining_quantity -= fill;
-                resting.order.quantity -= fill;
-                if (resting.order.quantity == 0) {
+                resting->order.quantity -= fill;
+                if (resting->order.quantity == 0) {
                     // A fully filled resting order is no longer cancellable.
-                    order_sides_.erase(resting.order.id);
-                    // Removing the front exposes the next-oldest order at this price.
-                    queue.erase(queue.begin());
+                    order_sides_.erase(resting->order.id);
+                    resting = queue.erase(resting);
+                } else {
+                    ++resting;
                 }
             }
             if (queue.empty()) {
                 // Do not retain an empty price level after its final order fills.
-                asks_.erase(level);
+                level = asks_.erase(level);
+            } else {
+                ++level;
             }
         }
     } else {
         // A seller may match only bids at or above its limit. Bids are descending,
         // so begin() is the highest-priced eligible level.
-        while (result.remaining_quantity > 0 && !bids_.empty() &&
-               bids_.begin()->first >= order.price) {
-            auto level = bids_.begin();
+        auto level = bids_.begin();
+        while (result.remaining_quantity > 0 && level != bids_.end() &&
+               level->first >= order.price) {
             auto& queue = level->second;
-            // Preserve FIFO priority between bids at the same price.
-            while (result.remaining_quantity > 0 && !queue.empty()) {
-                auto& resting = queue.front();
-                const Quantity fill = std::min(result.remaining_quantity, resting.order.quantity);
-                result.trades.push_back({resting.order.id, order.id, resting.order.price, fill});
+            // Preserve FIFO priority between every eligible bid at this price.
+            for (auto resting = queue.begin();
+                 result.remaining_quantity > 0 && resting != queue.end();) {
+                if (owner_id && resting->owner_id && *owner_id == *resting->owner_id) {
+                    ++resting;
+                    continue;
+                }
+                const Quantity fill = std::min(result.remaining_quantity, resting->order.quantity);
+                result.trades.push_back({resting->order.id, order.id, resting->order.price, fill});
                 result.remaining_quantity -= fill;
-                resting.order.quantity -= fill;
-                if (resting.order.quantity == 0) {
-                    order_sides_.erase(resting.order.id);
-                    queue.erase(queue.begin());
+                resting->order.quantity -= fill;
+                if (resting->order.quantity == 0) {
+                    order_sides_.erase(resting->order.id);
+                    resting = queue.erase(resting);
+                } else {
+                    ++resting;
                 }
             }
             if (queue.empty()) {
                 // Remove an exhausted bid level before considering the next one.
-                bids_.erase(level);
+                level = bids_.erase(level);
+            } else {
+                ++level;
             }
         }
     }
@@ -108,7 +125,7 @@ SubmitResult OrderBook::submit(Order order) {
     if (result.remaining_quantity > 0) {
         // Only the unfilled part becomes a new resting order at the original limit.
         order.quantity = result.remaining_quantity;
-        rest(std::move(order));
+        rest(std::move(order), owner_id);
         result.resting = true;
     }
     // Return every fill plus the portion (if any) that remains in the book.

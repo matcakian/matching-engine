@@ -218,6 +218,33 @@ int main() {
         assert(book.asks()[0].quantity == 4);
     }
 
+    // A participant must never fill its own order. Its resting liquidity stays
+    // in the book, while matching continues with eligible orders at the same
+    // price and then at worse eligible prices.
+    {
+        OrderBook book;
+        book.submit({701, Side::Sell, 10'000, 4}, OwnerId{1});
+        book.submit({702, Side::Sell, 10'000, 3}, OwnerId{2});
+        book.submit({703, Side::Sell, 10'025, 2}, OwnerId{2});
+
+        const auto result = book.submit({704, Side::Buy, 10'025, 6}, OwnerId{1});
+        assert(result.trades.size() == 2);
+        assert(result.trades[0].resting_order_id == 702);
+        assert(result.trades[0].quantity == 3);
+        assert(result.trades[1].resting_order_id == 703);
+        assert(result.trades[1].quantity == 2);
+        assert(result.remaining_quantity == 1);
+        assert(result.resting);
+        assert(book.contains(701));
+        assert(book.contains(704));
+        assert(book.asks().size() == 1);
+        assert(book.asks()[0].price == 10'000);
+        assert(book.asks()[0].quantity == 4);
+        assert(book.bids().size() == 1);
+        assert(book.bids()[0].price == 10'025);
+        assert(book.bids()[0].quantity == 1);
+    }
+
     // Price formatting must preserve zero-padded cents at both small and whole
     // dollar values used by order and trade reporting.
     {

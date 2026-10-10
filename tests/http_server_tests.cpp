@@ -191,13 +191,14 @@ void order_endpoint_test(const ServerFixture& server, const std::string& alice_t
     assert_order_failure("side=buy&price=9000&quantity=1", "form order data");
     assert_order_failure("{\"side\":\"hold\",\"price\":9000,\"quantity\":1,\"padding\":\"" + std::string(20'000, 'x') + "\"}", "long invalid order");
 
-    // A normal matching sell sweeps the seed bids ahead of Alice under
-    // price-time priority, then reduces Alice's resting order. It does not
-    // expose a user ID in the public book response.
+    // A sell sweeps eligible seed bids, but skips Alice's own resting buy.
+    // The self-trade-prevention remainder rests rather than filling her order.
     const auto matched = server.request("POST", "/api/orders", R"({"side":"sell","price":9000,"quantity":278})", alice_token);
     require_status(matched, 201, "matching sell order");
-    require(contains(matched.body, R"("resting":false)"), "fully filled sell unexpectedly rested");
-    require(contains(server.request("GET", "/api/orders", {}, alice_token).body, R"("quantity":7)"), "fill did not reduce Alice's resting quantity");
+    require(contains(matched.body, R"("resting":true)"), "self-trade remainder did not rest");
+    const auto alice_after_self_trade = server.request("GET", "/api/orders", {}, alice_token);
+    require(contains(alice_after_self_trade.body, R"("quantity":10)"), "self-trade reduced Alice's buy order");
+    require(contains(alice_after_self_trade.body, R"("quantity":3)"), "self-trade remainder was not persisted");
 
     // Create Bob, prove he cannot see or cancel Alice's order, then exercise a
     // repeated cancellation of Bob's own order.
@@ -209,15 +210,20 @@ void order_endpoint_test(const ServerFixture& server, const std::string& alice_t
     require(contains(bob_list.body, R"("orders":[])"), "Bob saw Alice's orders");
 
     assert_failure_then_book_works(server, server.request("DELETE", "/api/orders/7", {}, bob_token), 404, "Bob cancelling Alice order");
-    require(contains(server.request("GET", "/api/orders", {}, alice_token).body, R"("quantity":7)"), "Bob cancellation changed Alice order");
+    require(contains(server.request("GET", "/api/orders", {}, alice_token).body, R"("quantity":10)"), "Bob cancellation changed Alice order");
     assert_failure_then_book_works(server, server.request("DELETE", "/api/orders/not-a-number", {}, bob_token), 400, "invalid cancellation ID");
     assert_failure_then_book_works(server, server.request("POST", "/api/orders/7", "{}", bob_token), 404, "wrong order-detail method");
+
+    // A different user can still consume Alice's self-trade-prevention
+    // remainder, proving the order remains eligible for other participants.
+    require_status(server.request("POST", "/api/orders", R"({"side":"buy","price":9000,"quantity":3})", bob_token), 201, "Bob matching Alice sell");
+    require(contains(server.request("GET", "/api/orders", {}, alice_token).body, R"("quantity":10)"), "Bob match changed Alice's buy order");
 
     const auto bob_order = server.request("POST", "/api/orders", R"({"side":"sell","price":11000,"quantity":4})", bob_token);
     require_status(bob_order, 201, "Bob resting order");
     require(contains(server.request("GET", "/api/orders", {}, bob_token).body, R"("quantity":4)"), "Bob order was not visible to Bob");
-    require_status(server.request("DELETE", "/api/orders/9", {}, bob_token), 200, "cancel Bob order");
-    assert_failure_then_book_works(server, server.request("DELETE", "/api/orders/9", {}, bob_token), 404, "repeated cancellation");
+    require_status(server.request("DELETE", "/api/orders/10", {}, bob_token), 200, "cancel Bob order");
+    assert_failure_then_book_works(server, server.request("DELETE", "/api/orders/10", {}, bob_token), 404, "repeated cancellation");
 }
 
 void restart_and_transport_helper_test(ServerFixture& server, const std::string& alice_token, const std::string& bob_token) {
@@ -235,7 +241,7 @@ void restart_and_transport_helper_test(ServerFixture& server, const std::string&
     assert_book_works(server);
     require_status(server.request("GET", "/api/session", {}, alice_token), 200, "Alice session after restart");
     require_status(server.request("GET", "/api/session", {}, bob_token), 200, "Bob session after restart");
-    require(contains(server.request("GET", "/api/orders", {}, alice_token).body, R"("quantity":7)"), "Alice open order missing after restart");
+    require(contains(server.request("GET", "/api/orders", {}, alice_token).body, R"("quantity":10)"), "Alice open order missing after restart");
     require(contains(server.request("GET", "/api/orders", {}, bob_token).body, R"("quantity":4)"), "Bob open order missing after restart");
     require(contains(server.request("GET", "/api/book").body, "\"lastTrade\":null"), "temporary last trade survived restart");
 
